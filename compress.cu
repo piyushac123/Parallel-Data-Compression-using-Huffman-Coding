@@ -12,6 +12,24 @@ __device__ unsigned int counter, counter_2;
 
 __constant__ const unsigned int INTMAX = 2147483647;
 
+// structure for dictionary
+struct huffmanDictionary{
+    unsigned char bitSequence[256][191];
+    unsigned char bitSequenceLength[256];
+};
+
+// structure for node
+struct huffmanNode{
+    unsigned char letter;
+    unsigned int frequency;
+    struct huffmanNode * left, * right;
+};
+
+struct huffmanNode * huffmanTreeNode_head;
+struct huffmanDictionary huffmanDict;
+struct huffmanNode huffmanTreeNode[512];
+unsigned char bitSequenceConstMemory[256][255];
+
 __global__ void CalculateFrequency(unsigned char * device_inputFileData , unsigned int * device_frequency, unsigned int inputFileLength)
 {
     unsigned int id = blockIdx.x * blockDim.x + threadIdx.x ;
@@ -76,6 +94,38 @@ __global__ void findLeastFrequent(unsigned int *freq, unsigned int *min, int siz
             }
             
         }
+    }
+}
+
+__global__ void searchSimilarIndex(unsigned int *index, unsigned int *resultIndex, unsigned int *cnt, int threads){
+    int id = blockIdx.x*blockDim.x + threadIdx.x;
+    
+    __syncthreads();
+    counter = 0;
+    if(id != threads){
+        if(index[id] == index[threads]){
+            int temp = atomicInc(&counter, threads+1);
+            resultIndex[temp] = id;
+        }
+        __syncthreads();
+        cnt[0] = counter;
+    }
+}
+
+void buildHuffmanTree(int count,unsigned char *uniqueChar, unsigned int *frequency,int newIndex, int childIndex){
+    if(count == 0){
+        
+        huffmanTreeNode[newIndex].frequency = frequency[childIndex];
+        huffmanTreeNode[newIndex].letter = uniqueChar[childIndex];
+        huffmanTreeNode[newIndex].left = NULL;
+        huffmanTreeNode[newIndex].right = NULL;
+    }
+    else{
+        
+        huffmanTreeNode[newIndex].frequency = huffmanTreeNode[childIndex].frequency + huffmanTreeNode[childIndex + 1].frequency;
+        huffmanTreeNode[newIndex].left = & huffmanTreeNode[childIndex];
+        huffmanTreeNode[newIndex].right = & huffmanTreeNode[childIndex + 1];
+        huffmanTreeNode_head = & (huffmanTreeNode[newIndex]);
     }
 }
 
@@ -205,6 +255,41 @@ int main(int argc, char ** argv){
     // for(unsigned int i=0;i<cntMin[0];i++) printf("%d ",min[i]);
     // printf("\nIndMin:\n");
     // for(unsigned int i=0;i<cntMin[0];i++) printf("%d ",indMin[i]);
+
+    // Get all children
+    unsigned int *resultIndex, *dresultIndex;
+    unsigned int *cnt, *dcnt;
+    resultIndex = (unsigned int *)malloc(cntMin[0]*sizeof(unsigned int));
+    cudaMalloc(&dresultIndex, cntMin[0]*sizeof(unsigned int));
+    cnt = (unsigned int *)malloc(sizeof(unsigned int));
+    cudaMalloc(&dcnt, sizeof(unsigned int));
+
+    int indexChild;
+    for(int i=0;i<cntMin[0]-1;i++){
+        num = (float)(i+1)/(float)BLOCK_SIZE;
+        mod = BLOCK_SIZE;
+        if(i+1 < BLOCK_SIZE) mod = (i+1)%BLOCK_SIZE;
+        n = ceil(num);
+        
+        searchSimilarIndex<<<n, mod>>>(dindMin, dresultIndex, dcnt, i);
+        cudaDeviceSynchronize();
+
+        cudaMemcpy(resultIndex, dresultIndex, cntMin[0]*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(cnt, dcnt, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+        
+        if(cnt[0] == 0) indexChild = indMin[i];
+        else indexChild = *std::max_element(resultIndex, resultIndex + cnt[0])-1;
+        buildHuffmanTree(cnt[0], uniqueChar, tempFreq, i, indexChild);
+    }
+    // for(int j=0;j<cntMin[0]-1;j++){
+    //         printf("Index %d:Frequency %u",j,huffmanTreeNode[j].frequency);
+    //         if(huffmanTreeNode[j].letter != '\0') printf(":Letter %c\n",huffmanTreeNode[j].letter);
+    //         if(huffmanTreeNode[j].left != NULL) printf(":Left %u:Right %u\n",(huffmanTreeNode[j].left)->frequency,(huffmanTreeNode[j].right)->frequency);
+    //     }
+
+    if(distinctCharacterCount == 1){
+        huffmanTreeNode_head = & huffmanTreeNode[0];
+    }
 
     // end the clock, tick tick
     end = clock();
