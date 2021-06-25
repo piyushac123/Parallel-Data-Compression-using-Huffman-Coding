@@ -7,6 +7,7 @@
 #include <cuda.h>
 #include <algorithm>
 
+
 #define BLOCK_SIZE 1024
 __device__ unsigned int counter, counter_2;
 
@@ -112,6 +113,42 @@ __global__ void searchSimilarIndex(unsigned int *index, unsigned int *resultInde
     }
 }
 
+__global__ void compress(unsigned char * device_inputFileData,
+    unsigned int * device_compressedDataOffset,
+    struct huffmanDictionary * device_huffmanDictionary,
+    unsigned char * device_byteCompressedData,
+    unsigned int device_inputFileLength)
+{
+    __shared__ struct huffmanDictionary table;
+    memcpy(& table, device_huffmanDictionary, sizeof(struct huffmanDictionary));
+    unsigned int inputFileLength = device_inputFileLength;
+    unsigned int pos = blockIdx.x * blockDim.x + threadIdx.x;
+
+
+    for(int i = pos; i < inputFileLength; i += blockDim.x){
+        for(int k = 0; k < table.bitSequenceLength[device_inputFileData[i]]; k++){
+            device_byteCompressedData[device_compressedDataOffset[i] + k] = table.bitSequence[device_inputFileData[i]][k];
+        }
+    }
+
+    __syncthreads();
+
+    if(pos == inputFileLength-1){
+        unsigned int lastLetterOffset = device_compressedDataOffset[pos] ;
+        unsigned int lastLetterSeqLength = table.bitSequenceLength[device_inputFileData[pos]] ;
+        unsigned int ActualOffset = lastLetterOffset + lastLetterSeqLength ;
+        unsigned int formalOffset = device_compressedDataOffset[inputFileLength] ;
+        if(ActualOffset < formalOffset){
+            
+            for(int i = ActualOffset; i < formalOffset; i++){
+                device_byteCompressedData[i] = 0 ;
+            }
+        }
+    }
+
+}
+
+
 void buildHuffmanTree(int count,unsigned char *uniqueChar, unsigned int *frequency,int newIndex, int childIndex){
     if(count == 0){
         
@@ -127,6 +164,76 @@ void buildHuffmanTree(int count,unsigned char *uniqueChar, unsigned int *frequen
         huffmanTreeNode[newIndex].right = & huffmanTreeNode[childIndex + 1];
         huffmanTreeNode_head = & (huffmanTreeNode[newIndex]);
     }
+}
+
+void buildHuffmanDictionary(struct huffmanNode * root, unsigned char * bitSequence, unsigned char bitSequenceLength){
+    if(root -> left){
+        bitSequence[bitSequenceLength] = 0;
+        buildHuffmanDictionary(root -> left, bitSequence, bitSequenceLength + 1);
+    }
+
+    if(root -> right){
+        bitSequence[bitSequenceLength] = 1;
+        buildHuffmanDictionary(root -> right, bitSequence, bitSequenceLength + 1);
+    }
+
+    // copy the bit sequence and the length to the dictionary
+    if(root -> right == NULL && root -> left == NULL){
+        huffmanDict.bitSequenceLength[root -> letter] = bitSequenceLength;
+        
+        memcpy(huffmanDict.bitSequence[root -> letter], bitSequence, bitSequenceLength * sizeof(unsigned char));
+        
+    }
+}
+
+void createDataOffsetArray(unsigned int * compressedDataOffset, unsigned char * inputFileData, unsigned int inputFileLength)
+{
+    compressedDataOffset[0] = 0;
+    for(int i = 0; i < inputFileLength; i++){
+    compressedDataOffset[i + 1] = huffmanDict.bitSequenceLength[inputFileData[i]] + compressedDataOffset[i];
+    }
+    // not a byte & remaining values
+    if(compressedDataOffset[inputFileLength] % 8 != 0){
+    compressedDataOffset[inputFileLength] = compressedDataOffset[inputFileLength] + (8 - (compressedDataOffset[inputFileLength] % 8));
+    }
+}
+
+void launchCudaHuffmanCompress(unsigned char * inputFileData, unsigned int * compressedDataOffset, unsigned char *compressedData, unsigned int inputFileLength, int NumBlocks)
+{
+    struct huffmanDictionary * device_huffmanDictionary;
+    unsigned char * device_inputFileData, * device_byteCompressedData;
+    unsigned int * device_compressedDataOffset;
+    
+
+    createDataOffsetArray(compressedDataOffset, inputFileData, inputFileLength);
+    
+    cudaMalloc((void **) & device_inputFileData, inputFileLength * sizeof(unsigned char));
+        
+    cudaMalloc((void **) & device_compressedDataOffset, (inputFileLength + 1) * sizeof(unsigned int));
+        
+    cudaMalloc((void **) & device_huffmanDictionary, sizeof(huffmanDictionary));
+        
+    cudaMemcpy(device_inputFileData, inputFileData, inputFileLength * sizeof(unsigned char), cudaMemcpyHostToDevice);
+        
+    cudaMemcpy(device_compressedDataOffset, compressedDataOffset, (inputFileLength + 1) * sizeof(unsigned int), cudaMemcpyHostToDevice);
+        
+    cudaMemcpy(device_huffmanDictionary, & huffmanDict, sizeof(huffmanDict), cudaMemcpyHostToDevice);
+    
+    cudaMalloc((void **) & device_byteCompressedData, (compressedDataOffset[inputFileLength]) * sizeof(unsigned char));
+	
+    cudaMemset(device_byteCompressedData, 0, compressedDataOffset[inputFileLength] * sizeof(unsigned char));
+	
+    compress<<<NumBlocks, BLOCK_SIZE>>>(device_inputFileData, device_compressedDataOffset, device_huffmanDictionary, device_byteCompressedData, inputFileLength);
+    
+    // copy compressed data from GPU to CPU memory
+    cudaMemcpy(compressedData, device_byteCompressedData, ((compressedDataOffset[inputFileLength])) * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+    
+    // free allocated memory
+    cudaFree(device_inputFileData);
+    cudaFree(device_compressedDataOffset);
+    cudaFree(device_huffmanDictionary);
+    cudaFree(device_byteCompressedData);
+
 }
 
 int main(int argc, char ** argv){
@@ -291,13 +398,55 @@ int main(int argc, char ** argv){
         huffmanTreeNode_head = & huffmanTreeNode[0];
     }
 
+    // build the huffman dictionary
+    buildHuffmanDictionary(huffmanTreeNode_head, bitSequence, bitSequenceLength);
+
+    // printf("HOST DICTIONARY\n");
+    // for(int i = 0; i < 256; i ++){
+    //     if(frequency[i]>0){
+    //         printf("%c\t",i);
+    //         for(int k = 0; k < huffmanDict.bitSequenceLength[i]; k++){
+    //             printf("%u",huffmanDict.bitSequence[i][k]);
+    //         }
+    //         printf("\n");
+    //     }
+    // }
+
+    memOffset = 0;
+    for(int i = 0; i < 256; i++)
+        memOffset += frequency[i] * huffmanDict.bitSequenceLength[i];
+    long unsigned int actualOffset = memOffset;
+    //printf("actual offset %ld\n",actualOffset);
+    memOffset = memOffset % 8 == 0 ? memOffset : memOffset + 8 - memOffset % 8;
+
+    printf("Output file length : %ld\n",memOffset/8);
+
+    unsigned int extra = memOffset - actualOffset ;
+
+    // generate offset data array
+    compressedDataOffset = (unsigned int * ) malloc((inputFileLength + 1) * sizeof(unsigned int));
+
+    unsigned char *compressedData = (unsigned char * ) malloc(compressedDataOffset[inputFileLength] * sizeof(unsigned char));
+    // launch kernel
+    launchCudaHuffmanCompress(inputFileData, compressedDataOffset,compressedData, inputFileLength, NumBlocks);
+
     // end the clock, tick tick
     end = clock();
+
+    // writing the compressed file to the output
+    compressedFile = fopen(argv[2], "wb");
+    fwrite(& inputFileLength, sizeof(unsigned int), 1, compressedFile);
+    fwrite(& extra, sizeof(unsigned int), 1, compressedFile);
+    fwrite(frequency, sizeof(unsigned int), 256, compressedFile);
+    fwrite(compressedData, sizeof(unsigned char), compressedDataOffset[inputFileLength], compressedFile);
+    fclose(compressedFile);
 
     cpuTimeUsed = ((end - start)) * 1000 / CLOCKS_PER_SEC;
     printf("\n\nTime taken :: %d:%d s\n", cpuTimeUsed / 1000, cpuTimeUsed % 1000);
 
     free(inputFileData);
+    free(compressedDataOffset);
 
     return 0;
 }
+
