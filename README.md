@@ -16,10 +16,21 @@
 
 ### Steps for Execution -
 * Build Histogram by calculating count of characters in given Input file.
-* Recursively find 2 minimum current frequencies to evaluate new frequency node.
+* Recursively find 2 minimum frequencies to evaluate new frequency node.
 * Build Huffman Tree and Huffman Dictionary using calculated frequency count.
 * Compress given Input file using Huffman Dictionary.
 * Store compressed data to output file.
 
-### Advantages -
-* 
+### Unique stratergies -
+* Build Histogram using parallel approach.
+* Find 2 minimum frequencies using methodology similar to parallel reduction.
+* Parallelly compress Input file along multiple threads.
+* Moreover also build Huffman dictionary to avoid multiple traversal through Huffman tree.
+
+### Future scope -
+* To further optimize runtime and enhance effectiveness we can use following approaches -
+  * Parallelized Burrows-Wheeler transform(BWT)
+  * Parallelized Move-to-front transform (MTF)
+ 
+### References -
+* https://ieeexplore.ieee.org/document/6339599
